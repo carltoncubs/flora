@@ -13,6 +13,9 @@ pyjwt = "*"
 google-auth = "*"
 python-dotenv = "*"
 flask-cors = "*"
+gunicorn = "*"
+celery = "*"
+"psycopg2" = "*"
 
 [dev-packages]
 isort = "*"

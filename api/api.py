@@ -70,7 +70,8 @@ import requests
 import dotenv
 import jwt
 import models
-from flask import Flask, abort, request, jsonify
+import worker
+from flask import Flask, abort, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import BadRequest
 
@@ -78,20 +79,25 @@ dotenv.load_dotenv()
 
 app = Flask(__name__)
 app.response_class.default_mimetype = "application/json"
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///cub-attendance.db"
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("SQLALCHEMY_DATABASE_URI")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SECRET_KEY"] = os.urandom(20)
 app.config["JWT_SECRET_KEY"] = os.urandom(20)
 app.config["JWT_ALGORITHM"] = "HS256"
-app.config["GOOGLE_SERVICE_ACCOUNT_CREDS"] = "cub-attendance.json"
-app.config["GOOGLE_CLIENT_ID"] = os.getenv("GOOGLE_CLIENT_ID")
-app.config["GOOGLE_CLIENT_SECRET"] = os.getenv("GOOGLE_CLIENT_SECRET")
 app.config["GOOGLE_TOKEN_INFO"] = "https://www.googleapis.com/oauth2/v3/tokeninfo"
 
 CORS(app)
 
 models.db.init_app(app)
-models.db.create_all(app=app)
+
+def init_db():
+    models.db.create_all(app=app)
+
+@app.cli.command("initdb")
+def initdb_cmd():
+    """Initialise DB."""
+    init_db()
+    print("Initialised database.")
 
 with app.app_context():
     query = models.db.session.query(models.User).filter_by(
@@ -252,6 +258,13 @@ def sign_out(email):
         app.logger.info("Error: %s", e)
         abort(400)
 
+    settings = (
+        models.db.session.query(models.Settings)
+        .join(models.User)
+        .filter_by(email=email)
+        .first()
+    )
+
     query = (
         models.db.session.query(models.Attendance)
         .filter_by(cub_name=data["cubName"])
@@ -259,6 +272,8 @@ def sign_out(email):
     )
 
     if not models.db.session.query(query.exists()).scalar():
+        app.logger.info(f"No matching sign in record found for %s", data["cubName"])
+
         attendance = models.Attendance(
             cub_name=data["cubName"],
             parent_signature_out=data["parentSignature"],
@@ -267,6 +282,17 @@ def sign_out(email):
         )
         models.db.session.add(attendance)
         models.db.session.commit()
+
+        worker.celery.send_task(
+            "tasks.record_attendance",
+            args=[settings.spreadsheet_id, settings.sheet_name],
+            kwargs={
+                "cub_name": attendance.cub_name,
+                "parent_signature_out": attendance.parent_signature_out,
+                "time_out": attendance.time_out.isoformat(),
+                "date_out": attendance.date_out.isoformat(),
+            },
+        )
 
         return (
             jsonify(
@@ -285,6 +311,21 @@ def sign_out(email):
     attendance.time_out = time_
     attendance.date_out = date_
     models.db.session.commit()
+
+    worker.celery.send_task(
+        "tasks.record_attendance",
+        args=[],
+        kwargs={
+            "cub_name": attendance.cub_name,
+            "cub_signature_in": attendance.cub_signature_in,
+            "parent_signature_in": attendance.parent_signature_in,
+            "parent_signature_out": attendance.parent_signature_out,
+            "time_in": attendance.time_in.isoformat(),
+            "date_in": attendance.date_out.isoformat(),
+            "time_out": attendance.time_out.isoformat(),
+            "date_out": attendance.date_out.isoformat(),
+        },
+    )
 
     return jsonify(
         {

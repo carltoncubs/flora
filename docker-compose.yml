@@ -1,0 +1,47 @@
+version: "3"
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: "no" 
+    ports:
+      - "8000:8000"
+    depends_on:
+      - rabbit
+      - pg
+    environment:
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbit:5672
+      - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://${DB_USER}:${DB_PASS}@pg:5432/${DB_NAME}
+
+  celery_worker:
+    user: nobody
+    restart: "no"
+    build:
+      context: ./celery
+      dockerfile: Dockerfile
+    depends_on:
+      - pg
+      - rabbit
+    environment:
+      - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://${DB_USER}:${DB_PASS}@pg:5432/${DB_NAME}
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbit:5672
+      - SERVICE_ACCOUNT_CREDS=cub-attendance.json
+
+  rabbit:
+    restart: "no"
+    image: rabbitmq:3.7.8-management-alpine
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS}
+
+  pg:
+    restart: "no"
+    image: postgres:11.1-alpine
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASS}
