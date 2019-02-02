@@ -12,8 +12,9 @@ COPY Pipfile.lock /celery/Pipfile.lock
 WORKDIR /celery
 
 RUN pip install pipenv
+RUN pipenv update
 RUN pipenv install --system --deploy --ignore-pipfile
 
 COPY tasks.py /celery/tasks.py
 
-ENTRYPOINT wait-for-it pg:5432 -- celery -A tasks worker --loglevel=debug --concurrency=20
+ENTRYPOINT wait-for-it pg:5432 -- celery -A tasks worker --loglevel=info --concurrency=20
