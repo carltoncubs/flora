@@ -37,7 +37,7 @@ Endpoint used to submit sub sign ins. It expects "cubName",
 Endpoint used to submit sub sign outs. It expects "cubName" and
 "parentSignature" in the request body.
 
-:code`GET /settings` (reuqires authorisation)
+:code`GET /settings` (requires authorisation)
 
 Endpoint used to get previously set settings. The response body will
 contain the keys; "spreadsheetId", "attendanceSheet",
@@ -74,6 +74,23 @@ import worker
 from flask import Flask, abort, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import BadRequest
+from logging.config import dictConfig
+
+dictConfig({
+    'version': 1,
+    'formatters': {'default': {
+        'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
+    }},
+    'handlers': {'wsgi': {
+        'class': 'logging.StreamHandler',
+        'stream': 'ext://flask.logging.wsgi_errors_stream',
+        'formatter': 'default'
+    }},
+    'root': {
+        'level': 'DEBUG',
+        'handlers': ['wsgi']
+    }
+})
 
 dotenv.load_dotenv()
 
@@ -81,8 +98,8 @@ app = Flask(__name__)
 app.response_class.default_mimetype = "application/json"
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("SQLALCHEMY_DATABASE_URI")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["SECRET_KEY"] = os.urandom(20)
-app.config["JWT_SECRET_KEY"] = os.urandom(20)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 app.config["JWT_ALGORITHM"] = "HS256"
 app.config["GOOGLE_TOKEN_INFO"] = "https://www.googleapis.com/oauth2/v3/tokeninfo"
 
@@ -93,13 +110,14 @@ models.db.init_app(app)
 def init_db():
     models.db.create_all(app=app)
 
-@app.cli.command("initdb")
-def initdb_cmd():
-    """Initialise DB."""
-    init_db()
-    print("Initialised database.")
 
 with app.app_context():
+    try:
+        init_db()
+        print("Database initialised")
+    except:
+        print("Database already initialised")
+
     query = models.db.session.query(models.User).filter_by(
         email="nicholas.spain96@gmail.com"
     )
@@ -150,6 +168,7 @@ def verify_google_access_token(access_token):
     resp = requests.get(uri)
     if not resp.ok:
         app.logger.info(f"Failed to get token info from {uri}")
+        app.logger.debug("Body: %s", resp.content.decode("utf-8"))
         return None
 
     info = resp.json()
@@ -179,7 +198,7 @@ def google_auth():
     user = verify_google_access_token(access_token)
     if user is None:
         app.logger.info("access token (%s) is invalid", access_token)
-        abort(400)
+        abort(401)
 
     email = user["email"]
     query = models.db.session.query(models.User).filter_by(email=email)
@@ -192,8 +211,8 @@ def google_auth():
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24),
             "email": email,
         },
-        app.config.get("JWT_SECRET_KEY"),
-        algorithm="HS256",
+        app.config["JWT_SECRET_KEY"],
+        algorithm=app.config["JWT_ALGORITHM"],
     )
 
     user = models.db.session.query(models.User).filter_by(email=email).first()
@@ -208,6 +227,7 @@ def google_auth():
 def sign_in(email):
     try:
         data = request.get_json()
+        app.logger.debug("Body: %s", data)
         time_ = datetime.datetime.strptime(data["time"], "%H:%M:%S").time()
         date_ = datetime.datetime.strptime(data["date"], "%Y-%m-%d").date()
     except BadRequest as e:
@@ -249,6 +269,7 @@ def sign_in(email):
 def sign_out(email):
     try:
         data = request.get_json()
+        app.logger.debug(f"Request body: {data}")
         time_ = datetime.datetime.strptime(data["time"], "%H:%M:%S").time()
         date_ = datetime.datetime.strptime(data["date"], "%Y-%m-%d").date()
     except BadRequest as e:
@@ -265,12 +286,18 @@ def sign_out(email):
         .first()
     )
 
+    if settings is None:
+        app.logger.warn("No settings could be found for the authenticated user, they need to set them")
+        abort(500)
+
     query = (
         models.db.session.query(models.Attendance)
         .filter_by(cub_name=data["cubName"])
         .order_by(models.Attendance.date_in)
     )
 
+    # Try to get the corresponding sign in record out of the
+    # database. If this fails then we just submit the sign out.
     if not models.db.session.query(query.exists()).scalar():
         app.logger.info(f"No matching sign in record found for %s", data["cubName"])
 
@@ -285,7 +312,7 @@ def sign_out(email):
 
         worker.celery.send_task(
             "tasks.record_attendance",
-            args=[settings.spreadsheet_id, settings.sheet_name],
+            args=[settings.spreadsheet_id, settings.attendance_sheet],
             kwargs={
                 "cub_name": attendance.cub_name,
                 "parent_signature_out": attendance.parent_signature_out,
@@ -314,7 +341,7 @@ def sign_out(email):
 
     worker.celery.send_task(
         "tasks.record_attendance",
-        args=[],
+        args=[settings.spreadsheet_id, settings.attendance_sheet],
         kwargs={
             "cub_name": attendance.cub_name,
             "cub_signature_in": attendance.cub_signature_in,
@@ -372,7 +399,7 @@ def settings_post(email):
     try:
         data = request.get_json()
     except BadRequest as e:
-        app.logger.info("Error parseing JSON request body: %s", e)
+        app.logger.info("Error parsing JSON request body: %s", e)
         abort(400)
 
     query = (
