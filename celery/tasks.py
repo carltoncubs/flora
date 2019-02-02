@@ -4,6 +4,7 @@ from celery.utils.log import get_task_logger
 from celery.exceptions import Ignore
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.sql import text
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -22,8 +23,10 @@ logger = get_task_logger(__name__)
 def record_attendance(self, spreadsheet_id, sheet_name, **kwargs):
     """Record a cub's attendance in the google sheet and clear the
     attendance record out of the database."""
-    query = session.query("user").filter_by(**kwargs)
-    if not session.query(query.exists()).scalar():
+    logger.debug("kwargs = %s", kwargs)
+    stmt = text("SELECT * FROM Attendance WHERE cub_name = :name")
+    query = session.execute(stmt, {"name": kwargs["cub_name"]}).fetchall()
+    if len(query) == 0:
         logger.error("No attendance records found for %s", kwargs["cub_name"])
         self.update_state(
             state=states.FAILURE,
@@ -31,7 +34,7 @@ def record_attendance(self, spreadsheet_id, sheet_name, **kwargs):
         )
         raise Ignore()
 
-    record = query.first()
+    record = query[0]
     client = make_sheets_client(SERVICE_CREDS_FILE)
     resp = append_row(
         client,
@@ -55,8 +58,8 @@ def record_attendance(self, spreadsheet_id, sheet_name, **kwargs):
         )
         raise Ignore()
 
-    session.delete(record)
-    session.commit()
+    stmt = text("DELETE FROM Attendance WHERE cub_name = :cub_name")
+    session.execute(stmt, cub_name=kwargs["cub_name"]).fetchall()
 
 
 def append_row(client, spreadsheet_id, sheet_name, row):
