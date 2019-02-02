@@ -12,6 +12,7 @@ COPY Pipfile.lock /api/Pipfile.lock
 WORKDIR /api
 
 RUN pip install pipenv
+RUN pipenv update
 RUN pipenv install --system --deploy --ignore-pipfile
 
 COPY worker.py /api/worker.py
