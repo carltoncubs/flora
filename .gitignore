@@ -1,4 +1,5 @@
-/cub-attendance.db
-/cub-attendance.json
+/**/cub-attendance.db
+/**/cub-attendance.json
 .venv
-/.env
+/**/*.env*
+*.bak
