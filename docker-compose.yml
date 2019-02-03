@@ -18,8 +18,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - LOG_LEVEL=info
 
-  celery_worker:
-    user: nobody
+  celery-worker:
     restart: "no"
     build:
       context: ./celery
