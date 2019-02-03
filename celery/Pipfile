@@ -9,6 +9,7 @@ sqlalchemy = "*"
 google-auth = "*"
 google-api-python-client = "*"
 "psycopg2" = "*"
+uritemplate = "*"
 
 [dev-packages]
 
