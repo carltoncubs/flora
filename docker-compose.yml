@@ -16,6 +16,7 @@ services:
       - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://${DB_USER}:${DB_PASS}@pg:5432/${DB_NAME}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - LOG_LEVEL=info
 
   celery_worker:
     user: nobody
@@ -29,7 +30,8 @@ services:
     environment:
       - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://${DB_USER}:${DB_PASS}@pg:5432/${DB_NAME}
       - CELERY_BROKER_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbit:5672
-      - SERVICE_ACCOUNT_CREDS=cub-attendance.json
+      - SERVICE_CREDS_FILE=cub-attendance.json
+      - LOG_LEVEL=debug
 
   rabbit:
     restart: "no"
