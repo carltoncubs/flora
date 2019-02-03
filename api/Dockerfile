@@ -19,4 +19,4 @@ COPY worker.py /api/worker.py
 COPY models.py /api/models.py
 COPY api.py /api/api.py
 
-ENTRYPOINT wait-for-it pg:5432 -- gunicorn --bind 0.0.0.0:8000 --workers 3 --log-level debug api:app
+ENTRYPOINT wait-for-it pg:5432 -- gunicorn --bind 0.0.0.0:8000 --workers 3 --log-level ${LOG_LEVEL} api:app
