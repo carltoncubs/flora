@@ -18,4 +18,6 @@ RUN pipenv install --system --deploy --ignore-pipfile
 COPY ./tasks.py /celery/tasks.py
 COPY ./cub-attendance.json /celery/cub-attendance.json
 
-ENTRYPOINT wait-for-it pg:5432 -- celery -A tasks worker --loglevel=${LOG_LEVEL} --concurrency=20
+# RUN touch celerybeat-schedule
+
+ENTRYPOINT wait-for-it pg:5432 -- celery -A tasks worker -B --loglevel=${LOG_LEVEL} --concurrency=20 -s ./celerybeat-schedule
