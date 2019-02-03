@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 SERVICE_CREDS_FILE = os.getenv("SERVICE_CREDS_FILE")
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-SQLALCHEMY_DATBASE_URI = os.getenv("SQLALCHEMY_DATBASE_URI")
+SQLALCHEMY_DATBASE_URI = os.getenv("SQLALCHEMY_DATABASE_URI")
 
 celery = Celery("tasks", broker=CELERY_BROKER_URL, backend="rpc://")
 logger = get_task_logger(__name__)
@@ -33,6 +33,8 @@ Base = automap_base()
 engine = create_engine(SQLALCHEMY_DATBASE_URI)
 Base.prepare(engine, reflect=True)
 Name = Base.classes.name
+Settings = Base.classes.settings
+User = Base.classes.user
 
 session = Session(engine)
 
@@ -47,7 +49,7 @@ def make_sheets_client(service_creds_file):
 @celery.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
     sender.add_periodic_task(
-        5 * 60,  # Run every 5 minutes
+        5 * 60,
         update_name_autocomplete.s(),
         name="Update the autocomplete table for every user",
     )
@@ -55,10 +57,12 @@ def setup_periodic_tasks(sender, **kwargs):
 
 @celery.task(name="tasks.update_name_autocomplete")
 def update_name_autocomplete() -> None:
+    logger.info("Updating autocomplete table")
     logger.debug("Building sheets client from %s", SERVICE_CREDS_FILE)
     sheets = make_sheets_client(SERVICE_CREDS_FILE)
 
-    for user in User.query().all():
+    users = session.query(User).all()
+    for user in users:
         settings = (
             sesson.query(Settings).join(models.User).filter_by(user_id=user.id).first()
         )
@@ -73,7 +77,7 @@ def update_name_autocomplete() -> None:
         if result.get("values"):
             for name in result["values"]:
                 names.append(name[0])
-            Name.query().delete().where(user_id=user.id)
+            session.query(Name).filter(user_id == user.id).delete()
             for name in names:
                 session.add(Name(name=name, user_id=user.id))
             session.commit()
