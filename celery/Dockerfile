@@ -15,6 +15,7 @@ RUN pip install pipenv
 RUN pipenv update
 RUN pipenv install --system --deploy --ignore-pipfile
 
-COPY tasks.py /celery/tasks.py
+COPY ./tasks.py /celery/tasks.py
+COPY ./cub-attendance.json /celery/cub-attendance.json
 
-ENTRYPOINT wait-for-it pg:5432 -- celery -A tasks worker --loglevel=info --concurrency=20
+ENTRYPOINT wait-for-it pg:5432 -- celery -A tasks worker --loglevel=${LOG_LEVEL} --concurrency=20
