@@ -42,6 +42,7 @@ class Settings(db.Model):
 class Name(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(80), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"))
 
     def __str__(self):
         return f"Name(id={self.id}, name={self.name})"
