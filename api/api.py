@@ -76,21 +76,24 @@ from flask_cors import CORS
 from werkzeug.exceptions import BadRequest
 from logging.config import dictConfig
 
-dictConfig({
-    'version': 1,
-    'formatters': {'default': {
-        'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
-    }},
-    'handlers': {'wsgi': {
-        'class': 'logging.StreamHandler',
-        'stream': 'ext://flask.logging.wsgi_errors_stream',
-        'formatter': 'default'
-    }},
-    'root': {
-        'level': 'DEBUG',
-        'handlers': ['wsgi']
+dictConfig(
+    {
+        "version": 1,
+        "formatters": {
+            "default": {
+                "format": "[%(asctime)s] %(levelname)s in %(module)s: %(message)s"
+            }
+        },
+        "handlers": {
+            "wsgi": {
+                "class": "logging.StreamHandler",
+                "stream": "ext://flask.logging.wsgi_errors_stream",
+                "formatter": "default",
+            }
+        },
+        "root": {"level": os.getenv("LOGLEVEL"), "handlers": ["wsgi"]},
     }
-})
+)
 
 dotenv.load_dotenv()
 
@@ -107,6 +110,7 @@ CORS(app)
 
 models.db.init_app(app)
 
+
 def init_db():
     models.db.create_all(app=app)
 
@@ -121,7 +125,10 @@ with app.app_context():
     query = models.db.session.query(models.User).filter_by(
         email="nicholas.spain96@gmail.com"
     )
+
+    # If there is nothing in the DB then insert me
     if not models.db.session.query(query.exists()).scalar():
+        logger.info("Empty database, inserting Nick")
         user = models.User(name="Nicholas Spain", email="nicholas.spain96@gmail.com")
         models.db.session.add(user)
         models.db.session.commit()
@@ -139,31 +146,37 @@ def jwt_required(func):
         match = re.search("Bearer (.+)", request.headers.get("Authorization", ""))
         if match is None:
             app.logger.info("Could not find JWT in Authorization header")
+            app.logger.debug("Authorization: %s", request.headers.get("Authorization"))
             abort(400)
         token = match.group(1)
-
+        app.logger.debug("Found authorization token: %s", token)
         try:
             payload = jwt.decode(
                 token,
                 app.config["JWT_SECRET_KEY"],
                 algorithm=app.config["JWT_ALGORITHM"],
             )
+            app.logger.debug("JWT payload: %s", payload)
         except (jwt.ExpiredSignatureError, jwt.DecodeError) as e:
             app.logger.info("Error verifying JWT: %s", e)
             abort(401)
 
+        # Ensure that the user has been invited before allowing them
+        # to continue
         email = payload.get("email")
         query = models.db.session.query(models.User).filter_by(email=email)
         if not models.db.session.query(query.exists()).scalar():
             app.logger.info("Login from uninvited user (email=%s)", email)
             abort(401)
 
+        app.logger.debug("Login from user %s", email)
         return func(email, *args, **kwargs)
 
     return _wrap
 
 
 def verify_google_access_token(access_token):
+    """Verify access_token using the google token info endpoint."""
     uri = app.config.get("GOOGLE_TOKEN_INFO") + "?access_token=" + access_token
     resp = requests.get(uri)
     if not resp.ok:
@@ -239,25 +252,32 @@ def sign_in(email):
         app.logger.debug("Body: %s", data)
         abort(400)
 
-    attendance = models.Attendance(
-        cub_name=data["cubName"],
-        cub_signature_in=data["cubSignature"],
-        parent_signature_in=data["parentSignature"],
-        time_in=time_,
-        date_in=date_,
-    )
+    settings = get_user_settings(email)
+    if settings == None:
+        app.logger.info("No settings exist for the user %s", email)
+        return (jsonify({f"message": "No existing settings for user {email}"}), 400)
 
-    models.db.session.add(attendance)
-    models.db.session.commit()
+    worker.celery.send_task(
+        "tasks.add_sign_in",
+        args=(
+            data["cubName"],
+            data["cubSignature"],
+            data["parentSignature"],
+            time_,
+            date_,
+            settings.spreadsheet_id,
+            settings.attendance_sheet,
+        ),
+    )
 
     return (
         jsonify(
             {
-                "cubName": attendance.cub_name,
-                "cubSignature": attendance.cub_signature_in,
-                "parentSignatureIn": attendance.parent_signature_in,
-                "timeIn": attendance.time_in.isoformat(),
-                "dateIn": attendance.date_in.isoformat(),
+                "cubName": data["cubName"],
+                "cubSignature": data["cubSignature"],
+                "parentSignatureIn": data["parentSignature"],
+                "timeIn": time_.isoformat(),
+                "dateIn": time_.isoformat(),
             }
         ),
         204,
@@ -279,92 +299,33 @@ def sign_out(email):
         app.logger.info("Error: %s", e)
         abort(400)
 
-    settings = (
-        models.db.session.query(models.Settings)
-        .join(models.User)
-        .filter_by(email=email)
-        .first()
-    )
-
-    if settings is None:
-        app.logger.warn("No settings could be found for the authenticated user, they need to set them")
-        abort(500)
-
-    query = (
-        models.db.session.query(models.Attendance)
-        .filter_by(cub_name=data["cubName"])
-        .order_by(models.Attendance.date_in)
-    )
-
-    # Try to get the corresponding sign in record out of the
-    # database. If this fails then we just submit the sign out.
-    if not models.db.session.query(query.exists()).scalar():
-        app.logger.info(f"No matching sign in record found for %s", data["cubName"])
-
-        attendance = models.Attendance(
-            cub_name=data["cubName"],
-            parent_signature_out=data["parentSignature"],
-            time_out=time_,
-            date_out=date_,
-        )
-        models.db.session.add(attendance)
-        models.db.session.commit()
-
-        worker.celery.send_task(
-            "tasks.record_attendance",
-            args=[settings.spreadsheet_id, settings.attendance_sheet],
-            kwargs={
-                "cub_name": attendance.cub_name,
-                "parent_signature_out": attendance.parent_signature_out,
-                "time_out": attendance.time_out.isoformat(),
-                "date_out": attendance.date_out.isoformat(),
-            },
-        )
-
-        return (
-            jsonify(
-                {
-                    "cubName": attendance.cub_name,
-                    "parentSignatureOut": attendance.parent_signature_out,
-                    "timeOut": attendance.time_out.isoformat(),
-                    "dateOut": attendance.date_out.isoformat(),
-                }
-            ),
-            201,
-        )
-
-    attendance = query.first()
-    attendance.parent_signature_out = data["parentSignature"]
-    attendance.time_out = time_
-    attendance.date_out = date_
-    models.db.session.commit()
+    settings = get_user_settings(email)
+    if settings == None:
+        app.logger.info("No settings exist for the user %s", email)
+        return (jsonfiy({f"message": "No existing settings for user {email}"}), 400)
 
     worker.celery.send_task(
-        "tasks.record_attendance",
-        args=[settings.spreadsheet_id, settings.attendance_sheet],
-        kwargs={
-            "cub_name": attendance.cub_name,
-            "cub_signature_in": attendance.cub_signature_in,
-            "parent_signature_in": attendance.parent_signature_in,
-            "parent_signature_out": attendance.parent_signature_out,
-            "time_in": attendance.time_in.isoformat(),
-            "date_in": attendance.date_out.isoformat(),
-            "time_out": attendance.time_out.isoformat(),
-            "date_out": attendance.date_out.isoformat(),
-        },
+        "tasks.add_sign_out",
+        args=(
+            data["cubName"],
+            data["parentSignature"],
+            time_,
+            date_,
+            settings.spreadsheet_id,
+            settings.attendance_sheet,
+        ),
     )
 
-    return jsonify(
-        {
-            "cubName": attendance.cub_name,
-            "cubSignatureIn": attendance.cub_signature_in,
-            "parentSignatureIn": attendance.parent_signature_in,
-            "parentSignatureOut": attendance.parent_signature_out,
-            "timeIn": attendance.time_in.isoformat(),
-            "dateIn": attendance.date_out.isoformat(),
-            "timeOut": attendance.time_out.isoformat(),
-            "dateOut": attendance.date_out.isoformat(),
-        }
+    return (
+        jsonify(
+            {
+                "cubName": data["cubName"],
+                "parentSignatureOut": data["parentSignature"],
+                "timeOut": time_.isoformat(),
+                "dateOut": time_.isoformat(),
+            }
+        ),
+        201,
     )
 
 
@@ -410,11 +371,16 @@ def settings_post(email):
 
     if not models.db.session.query(query.exists()).scalar():
         user = models.db.session.query(models.User).filter_by(email=email).first()
+
+        autocomplete_sheet = data.get("autocompleteSheet")
+        if autocomplete_sheet is not None:
+            autocomplete_sheet = autocomplete_sheet.strip()
+
         user_settings = models.Settings(
-            spreadsheet_id=data["spreadsheetId"],
-            attendance_sheet=data["attendanceSheet"],
-            autocomplete_sheet=data.get("autocompleteSheet"),
+            spreadsheet_id=data["spreadsheetId"].strip(),
+            attendance_sheet=data["attendanceSheet"].strip(),
             user_id=user.id,
+            autocomplete_sheet=autocomplete_sheet,
         )
 
         models.db.session.add(user_settings)
@@ -426,9 +392,12 @@ def settings_post(email):
     user = models.db.session.query(models.User).filter_by(email=email).first()
 
     user_settings = query.first()
-    user_settings.spreadsheet_id = data["spreadsheetId"]
-    user_settings.attendance_sheet = data["attendanceSheet"]
-    user_settings.autocomplete_sheet = data.get("autocompleteSheet")
+    user_settings.spreadsheet_id = data["spreadsheetId"].strip()
+    user_settings.attendance_sheet = data["attendanceSheet"].strip()
+    autocomplete_sheet = data.get("autocompleteSheet")
+    if autocomplete_sheet is not None:
+        autocomplete_sheet = autocomplete_sheet.strip()
+    user_settings.autocomplete_sheet = autocomplete_sheet
     user_settings.user_id = user.id
     app.logger.debug("Updated settings: %s", user_settings)
     models.db.session.commit()
@@ -439,8 +408,17 @@ def settings_post(email):
 @app.route("/v1/names", methods=["GET"])
 @jwt_required
 def names(email):
-    return jsonify(
-        {"names": [row.names for row in models.db.session.query(models.Names).all()]}
+    user = models.db.session.query(models.User).filter_by(email=email).first()
+    name_records = models.db.session.query(models.Name).fitler_by(user_id=user.id).all()
+    return jsonify({"names": [name_record.name for name_record in name_records]})
+
+
+def get_user_settings(email):
+    return (
+        models.db.session.query(models.Settings)
+        .join(models.User)
+        .filter_by(email=email)
+        .first()
     )
 
 
